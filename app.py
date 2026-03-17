@@ -25,6 +25,7 @@ def extract_number(text):
     except:
         return 0
 
+@st.cache_data(ttl=300, show_spinner=False)
 def scrape_reddit(query):
     """Scrape Reddit search results"""
     url = f'https://old.reddit.com/search/'

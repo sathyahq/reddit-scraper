@@ -1,65 +1,90 @@
 import streamlit as st
 import requests
+import xml.etree.ElementTree as ET
 
 st.set_page_config(page_title="Reddit Search", layout="wide")
 st.title("🔍 Reddit Search")
-
-def get_token(client_id, client_secret):
-    auth = requests.auth.HTTPBasicAuth(client_id, client_secret)
-    data = {"grant_type": "client_credentials"}
-    headers = {"User-Agent": "reddit-search-app/1.0"}
-    r = requests.post("https://www.reddit.com/api/v1/access_token",
-                      auth=auth, data=data, headers=headers, timeout=10)
-    r.raise_for_status()
-    return r.json()["access_token"]
+st.caption("Search Reddit posts instantly")
 
 @st.cache_data(ttl=300, show_spinner=False)
-def search_reddit(query, client_id, client_secret):
-    token = get_token(client_id, client_secret)
+def search_reddit(query):
     headers = {
-        "Authorization": f"bearer {token}",
-        "User-Agent": "reddit-search-app/1.0"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36"
     }
-    params = {"q": query, "sort": "relevance", "limit": 20}
-    r = requests.get("https://oauth.reddit.com/search", headers=headers, params=params, timeout=10)
-    r.raise_for_status()
-    posts = []
-    for child in r.json()["data"]["children"]:
-        d = child["data"]
-        posts.append({
-            "title": d.get("title", ""),
-            "subreddit": d.get("subreddit_name_prefixed", ""),
-            "upvotes": d.get("score", 0),
-            "comments": d.get("num_comments", 0),
-            "url": "https://reddit.com" + d.get("permalink", ""),
-        })
-    return posts
 
-# Check for credentials
-if "reddit" not in st.secrets:
-    st.error("Reddit API credentials not configured.")
-    st.markdown("""
-**Setup steps:**
+    # Try OAuth API first if credentials are available
+    if "reddit" in st.secrets:
+        try:
+            auth = requests.auth.HTTPBasicAuth(
+                st.secrets["reddit"]["client_id"],
+                st.secrets["reddit"]["client_secret"]
+            )
+            token_r = requests.post(
+                "https://www.reddit.com/api/v1/access_token",
+                auth=auth,
+                data={"grant_type": "client_credentials"},
+                headers={"User-Agent": "reddit-search-app/1.0"},
+                timeout=10
+            )
+            token_r.raise_for_status()
+            token = token_r.json()["access_token"]
+            r = requests.get(
+                "https://oauth.reddit.com/search",
+                headers={"Authorization": f"bearer {token}", "User-Agent": "reddit-search-app/1.0"},
+                params={"q": query, "sort": "relevance", "limit": 20},
+                timeout=10
+            )
+            r.raise_for_status()
+            posts = []
+            for child in r.json()["data"]["children"]:
+                d = child["data"]
+                posts.append({
+                    "title": d.get("title", ""),
+                    "subreddit": d.get("subreddit_name_prefixed", ""),
+                    "upvotes": d.get("score", 0),
+                    "comments": d.get("num_comments", 0),
+                    "url": "https://reddit.com" + d.get("permalink", ""),
+                })
+            return posts, None
+        except Exception as e:
+            pass  # Fall through to RSS
 
-1. Go to [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps)
-2. Click **"create another app"** at the bottom
-3. Fill in:
-   - **name:** any name
-   - **type:** select **script**
-   - **redirect uri:** `http://localhost`
-4. Click **Create app** — copy the **client ID** (under the app name) and **secret**
-5. In Streamlit Cloud → your app → **Settings → Secrets**, paste:
-```toml
-[reddit]
-client_id = "your_client_id"
-client_secret = "your_client_secret"
-```
-6. Save and reboot the app
-""")
-    st.stop()
-
-client_id = st.secrets["reddit"]["client_id"]
-client_secret = st.secrets["reddit"]["client_secret"]
+    # Fallback: RSS feed (no credentials needed)
+    try:
+        r = requests.get(
+            "https://www.reddit.com/search.rss",
+            headers=headers,
+            params={"q": query, "sort": "relevance", "limit": 20},
+            timeout=10
+        )
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        entries = root.findall("atom:entry", ns)
+        posts = []
+        for entry in entries:
+            title = entry.findtext("atom:title", default="", namespaces=ns)
+            link = entry.find("atom:link", ns)
+            url = link.get("href", "") if link is not None else ""
+            # Extract subreddit from URL
+            parts = url.split("/")
+            subreddit = ""
+            if "r" in parts:
+                idx = parts.index("r")
+                if idx + 1 < len(parts):
+                    subreddit = "r/" + parts[idx + 1]
+            posts.append({
+                "title": title,
+                "subreddit": subreddit,
+                "upvotes": "—",
+                "comments": "—",
+                "url": url,
+            })
+        return posts, None
+    except Exception as e:
+        return [], str(e)
 
 col1, col2 = st.columns([4, 1])
 with col1:
@@ -68,19 +93,19 @@ with col2:
     search_btn = st.button("Search", use_container_width=True)
 
 if search_btn and topic:
-    try:
-        with st.spinner("Searching Reddit..."):
-            posts = search_reddit(topic, client_id, client_secret)
-        if posts:
-            st.success(f"Found {len(posts)} posts")
-            for post in posts:
-                st.markdown(f"### [{post['title']}]({post['url']})")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Upvotes", f"{post['upvotes']:,}")
-                c2.metric("Comments", f"{post['comments']:,}")
-                c3.metric("Subreddit", post['subreddit'])
-                st.divider()
-        else:
-            st.warning("No results found. Try a different topic.")
-    except Exception as e:
-        st.error(f"Error: {e}")
+    with st.spinner("Searching Reddit..."):
+        posts, error = search_reddit(topic)
+
+    if error:
+        st.error(f"Error: {error}")
+    elif posts:
+        st.success(f"Found {len(posts)} posts")
+        for post in posts:
+            st.markdown(f"### [{post['title']}]({post['url']})")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Upvotes", post['upvotes'])
+            c2.metric("Comments", post['comments'])
+            c3.metric("Subreddit", post['subreddit'])
+            st.divider()
+    else:
+        st.warning("No results found. Try a different topic.")
